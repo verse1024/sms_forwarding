@@ -102,6 +102,8 @@ void modemInit() {
     blink_short();
   }
   logCaptureLn(String("CNMI参数设置完成"));
+  sendATCommand("AT+HTTPINIT", 3000);
+  logCaptureLn(String("HTTP服务已初始化(AT+HTTPINIT)"));
   while (!sendATandWaitOK("AT+CMGF=0", 1000)) {
     logCaptureLn(String("设置PDU模式失败，重试..."));
     blink_short();
@@ -116,9 +118,11 @@ void modemInit() {
   if (ceregRetry < 30) {
     logCaptureLn(String("网络已注册"));
     modemReady = true;
+    simDetected = true;
   } else {
     logCaptureLn(String("⚠️ 网络注册超时（无SIM卡或信号差），模组功能不可用"));
     modemReady = false;
+    simDetected = false;
   }
 }
 
@@ -237,5 +241,33 @@ bool sendSMS(const char* phoneNumber, const char* message) {
     server.handleClient();
   }
   logCaptureLn(String("短信发送超时"));
+  return false;
+}
+
+// 激活移动数据连接
+bool activateMobileData() {
+  logCaptureLn(String("激活移动数据连接(AT+CGACT=1,1)..."));
+  String resp = sendATCommand("AT+CGACT=1,1", 10000);
+  if (resp.indexOf("OK") >= 0) {
+    mobileDataActive = true;
+    usingMobileData = true;
+    logCaptureLn(String("移动数据连接已激活"));
+    return true;
+  }
+  logCaptureLn(String("移动数据连接激活失败: " + resp));
+  return false;
+}
+
+// 关闭移动数据连接
+bool deactivateMobileData() {
+  logCaptureLn(String("关闭移动数据连接(AT+CGACT=0,1)..."));
+  String resp = sendATCommand("AT+CGACT=0,1", 5000);
+  mobileDataActive = false;
+  usingMobileData = false;
+  if (resp.indexOf("OK") >= 0) {
+    logCaptureLn(String("移动数据连接已关闭"));
+    return true;
+  }
+  logCaptureLn(String("移动数据连接关闭失败: " + resp));
   return false;
 }

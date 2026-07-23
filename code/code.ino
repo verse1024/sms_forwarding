@@ -2,13 +2,9 @@
 #include "wifi_config.h"
 #include "config.h"
 #include "web_handlers.h"
-#include "web_handlers.h"
 #include "modem.h"
-#include "web_handlers.h"
 #include "push.h"
-#include "web_handlers.h"
 #include "sms_process.h"
-#include "web_handlers.h"
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -29,35 +25,102 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);                    // 关闭 Modem Sleep，提高连接响应速度
   WiFi.setAutoReconnect(true);             // 断线后自动重连
-  // 使用快速扫描而非全信道扫描（全信道扫描在空信道上等待超时极慢）
-  // 首次连接成功后 ESP32 会自动记住信道，下次启动更快
   WiFi.setScanMethod(WIFI_FAST_SCAN);
   WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  logCaptureLn(String("连接wifi: ") + String(WIFI_SSID));
 
-  // 带超时的等待连接，失败则重启重试
-  unsigned long wifiStart = millis();
-  const unsigned long WIFI_TIMEOUT = 20000; // 20秒超时
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < WIFI_TIMEOUT) {
-    blink_short(200);
+  bool wifiConnected = false;
+
+  if (config.networkMode == NET_MODE_WIFI || config.networkMode == NET_MODE_WIFI_MOBILE) {
+    // 尝试最多2次：第一次连接WiFi1→失败→连接WiFi2→仍失败→启动AP
+    const int MAX_ATTEMPTS = 2;
+    
+    for (int attempt = 0; attempt < MAX_ATTEMPTS && !wifiConnected; attempt++) {
+      // 优先尝试 WiFi 1
+      if (!wifiConnected) {
+        logCaptureLn(String("第 ") + String(attempt + 1) + String(" 次尝试，连接 WiFi 1: ") + config.wifiSSID1);
+        WiFi.disconnect(false);
+        delay(200);
+        WiFi.begin(config.wifiSSID1.c_str(), config.wifiPass1.c_str());
+        
+        unsigned long wifiStart = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < WIFI_CONNECT_TIMEOUT) {
+          blink_short(200);
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+          wifiConnected = true;
+          logCaptureLn(String("WiFi 1 已连接"));
+        } else {
+          logCaptureLn(String("⚠️ WiFi 1 连接失败"));
+        }
+      }
+      
+      // WiFi 1 失败，尝试 WiFi 2
+      if (!wifiConnected) {
+        if (config.wifiSSID2.length() > 0) {
+          logCaptureLn(String("尝试连接 WiFi 2: ") + config.wifiSSID2);
+          WiFi.disconnect(false);
+          delay(200);
+          WiFi.begin(config.wifiSSID2.c_str(), config.wifiPass2.c_str());
+          
+          unsigned long wifiStart = millis();
+          while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < WIFI_CONNECT_TIMEOUT) {
+            blink_short(200);
+          }
+          if (WiFi.status() == WL_CONNECTED) {
+            wifiConnected = true;
+            logCaptureLn(String("WiFi 2 已连接"));
+          } else {
+            logCaptureLn(String("⚠️ WiFi 2 连接失败"));
+          }
+        } else {
+          logCaptureLn(String("⚠️ WiFi 2 未配置"));
+        }
+      }
+    }
+    
+    // 两组WiFi和两次重试都失败了 → 启动 AP 供用户配置
+    if (!wifiConnected) {
+      logCaptureLn(String("❌ WiFi 全部连接失败，启动 AP 热点..."));
+      WiFi.mode(WIFI_AP_STA);  // 先切换为同时支持 STA 和 AP
+      delay(200);
+      WiFi.softAP("SMS-FWD-Setup", "admin", 1, 0, 4);  // 1=隐藏SSID, 0=无加密, 4=最大1个客户端
+      delay(500);
+      logCaptureLn(String("AP 已启动: SMS-FWD-Setup / admin"));
+      logCaptureLn(String("请连接到该 WiFi 后访问 http://192.168.4.1 进行配置"));
+    }
+  } else {
+    // 流量模式：不连接 WiFi
+    logCaptureLn(String("流量模式，跳过 WiFi 连接"));
+
+    // 检查 SIM 卡是否存在
+    if (!simDetected) {
+      logCaptureLn(String("❌ 无SIM卡，启动 AP 热点供用户配置"));
+      WiFi.mode(WIFI_AP);
+      delay(200);
+      WiFi.softAP("SMS-FWD-Setup", "admin");
+      delay(500);
+      logCaptureLn(String("AP 已启动: SMS-FWD-Setup / admin"));
+      logCaptureLn(String("请连接到该 WiFi 后访问 http://192.168.4.1 进行配置"));
+    }
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    logCaptureLn(String("wifi已连接"));
+  if (wifiConnected) {
     logCapture(String("IP地址: "));
     logCaptureLn(WiFi.localIP().toString());
-    logCapture(String("信号强度(RSSI): "));
+    logCapture(String("信号强度 (RSSI): "));
     logCaptureLn(String(WiFi.RSSI()) + " dBm");
   } else {
-    logCaptureLn(String("⚠️ WiFi连接超时，即将重启重试..."));
-    delay(1000);
-    ESP.restart();
+    // WiFi 没连上没关系，设备已启动 AP，用户可以通过 AP 访问后台配置
+    if (WiFi.softAPIP() != IPAddress(0, 0, 0, 0)) {
+      logCaptureLn(String("AP 已就绪，请访问 http://") + WiFi.softAPIP().toString() + " 配置网络");
+    } else {
+      logCaptureLn(String("⚠️ WiFi 连接失败"));
+    }
   }
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
-  server.on("/tools", handleRoot);
+  server.on("/tools", handleToolsPage);
   server.on("/sms", handleRoot);
   server.on("/sendsms", HTTP_POST, handleSendSms);
   server.on("/ping", HTTP_POST, handlePing);

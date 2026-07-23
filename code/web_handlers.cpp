@@ -76,15 +76,58 @@ void handleRoot() {
   if (!checkAuth()) return;
   
   String html = String(htmlPage);
+
+  // 网络模式相关
+  int currentMode = (int)config.networkMode;
+  String netDesc;
+  switch (currentMode) {
+    case 0: // NET_MODE_WIFI
+      netDesc = "仅通过 WiFi 连接转发短信。设备启动时必须连接 WiFi，若 WiFi 超时将自动重启重试。";
+      break;
+    case 1: // NET_MODE_MOBILE
+      netDesc = "仅通过模组流量数据连接转发短信。设备启动时不连接 WiFi，会创建 AP 热点供配置。收到短信时自动激活数据连接进行推送。";
+      break;
+    default: // NET_MODE_WIFI_MOBILE
+      netDesc = "WiFi 优先，WiFi 不可用时自动回退到流量。设备启动时先尝试连接 WiFi；若 WiFi 超时，则启动 AP 热点并使用流量回退。";
+      break;
+  }
+  html.replace("%NET_MODE_WIFI_SEL%", currentMode == 0 ? "selected" : "");
+  html.replace("%NET_MODE_MOBILE_SEL%", currentMode == 1 ? "selected" : "");
+  html.replace("%NET_MODE_WIFI_MOBILE_SEL%", currentMode == 2 ? "selected" : "");
+  html.replace("%NET_MODE_WIFI_CHECK%", currentMode == 0 ? "checked" : "");
+  html.replace("%NET_MODE_MOBILE_CHECK%", currentMode == 1 ? "checked" : "");
+  html.replace("%NET_MODE_WIFI_MOBILE_CHECK%", currentMode == 2 ? "checked" : "");
+  html.replace("%NET_MODE_DESC%", netDesc);
+
+  // 网络模式文本 & SIM卡状态
+  String modeText;
+  switch (currentMode) {
+    case 0: modeText = "WiFi"; break;
+    case 1: modeText = "流量"; break;
+    default: modeText = "WiFi+流量"; break;
+  }
+  html.replace("%NET_MODE_TEXT%", modeText);
+
+  // SIM卡状态 — 使用 simDetected 全局变量
+  String simStatus = "未知";
+  if (!configValid) {
+    simStatus = "未配置";
+  } else if (simDetected) {
+    simStatus = "已识别";
+  } else {
+    simStatus = "无SIM卡";
+  }
+  html.replace("%SIM_STATUS%", simStatus);
+
   html.replace("%IP%", WiFi.localIP().toString());
-  html.replace("%WIFI_SSID%", String(WiFi.SSID()));
-  html.replace("%FREE_HEAP%", String(ESP.getFreeHeap() / 1024) + " KB");
-  long uptimeSec = millis() / 1000;
-  char uptimeBuf[16];
-  snprintf(uptimeBuf, sizeof(uptimeBuf), "%ld:%02ld:%02ld", uptimeSec / 3600, (uptimeSec % 3600) / 60, uptimeSec % 60);
-  html.replace("%UPTIME%", String(uptimeBuf));
   html.replace("%WEB_USER%", config.webUser);
   html.replace("%WEB_PASS%", config.webPass);
+  // WiFi配置
+  html.replace("%WIFI_SSID1%", config.wifiSSID1);
+  html.replace("%WIFI_PASS1%", config.wifiPass1);
+  html.replace("%WIFI_SSID2%", config.wifiSSID2);
+  html.replace("%WIFI_PASS2%", config.wifiPass2);
+  // 邮件配置
   html.replace("%SMTP_SERVER%", config.smtpServer);
   html.replace("%SMTP_PORT%", String(config.smtpPort));
   html.replace("%SMTP_USER%", config.smtpUser);
@@ -93,17 +136,6 @@ void handleRoot() {
   html.replace("%ADMIN_PHONE%", config.adminPhone);
   html.replace("%NUMBER_BLACK_LIST%", config.numberBlackList);
 
-  // 概览页面的配置状态
-  bool emailOk = config.smtpServer.length() > 0 && config.smtpUser.length() > 0 &&
-                 config.smtpPass.length() > 0 && config.smtpSendTo.length() > 0;
-  html.replace("%SMTP_CHECK%", emailOk ? "已配置" : "未配置");
-  html.replace("%MODEM_CHECK%", modemReady ? "已就绪" : "未就绪");
-  int pushCount = 0;
-  for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
-    if (config.pushChannels[i].enabled) pushCount++;
-  }
-  html.replace("%PUSH_COUNT%", String(pushCount));
-  
   // 生成推送通道HTML
   String channelsHtml = "";
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
@@ -112,8 +144,9 @@ void handleRoot() {
     String checked = config.pushChannels[i].enabled ? " checked" : "";
     
     channelsHtml += "<div class=\"push-channel" + enabledClass + "\" id=\"channel" + idx + "\">";
+    channelsHtml += "<input type=\"hidden\" name=\"push" + idx + "ch\" value=\"1\">";
     channelsHtml += "<div class=\"push-channel-header\">";
-    channelsHtml += "<input type=\"checkbox\" name=\"push" + idx + "en\" id=\"push" + idx + "en\" onchange=\"toggleChannel(" + idx + ")\"" + checked + ">";
+    channelsHtml += "<input type=\"checkbox\" name=\"push" + idx + "en\" id=\"push" + idx + "en\" value=\"1\" onchange=\"toggleChannel(" + idx + ")\"" + checked + ">";
     channelsHtml += "<label for=\"push" + idx + "en\" class=\"label-inline\">启用推送通道 " + String(i + 1) + "</label>";
     channelsHtml += "</div>";
     channelsHtml += "<div class=\"push-channel-body\">";
@@ -175,9 +208,13 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
-// 处理工具箱页面请求 — 已整合到主页，直接返回主页
+// 处理工具箱页面请求
 void handleToolsPage() {
-  handleRoot();
+  if (!checkAuth()) return;
+  
+  String html = String(toolsPage);
+  html.replace("%IP%", WiFi.localIP().toString());
+  server.send(200, "text/html", html);
 }
 
 // 处理飞行模式控制请求
@@ -848,6 +885,34 @@ void handlePing() {
 void handleSave() {
   if (!checkAuth()) return;
 
+  bool needRestart = false;
+  bool restartReason = false; // true=WIFI相关, false=网络模式切换
+
+  // 网络模式配置 — 仅在实际切换模式时才重启
+  if (server.hasArg("networkMode")) {
+    int mode = server.arg("networkMode").toInt();
+    if (mode >= 0 && mode <= 2) {
+      if ((int)config.networkMode != mode) {
+        config.networkMode = (NetworkMode)mode;
+        needRestart = true;
+        restartReason = false;
+        logCaptureLn(String("网络模式已更改: ") + String(mode) + String("，需要重启"));
+      }
+    }
+  }
+
+  // WiFi 配置 — 仅在实际改变时才重启
+  bool wifiChanged = false;
+  if (server.hasArg("wifiSSID1") && server.arg("wifiSSID1") != config.wifiSSID1) { config.wifiSSID1 = server.arg("wifiSSID1"); wifiChanged = true; }
+  if (server.hasArg("wifiPass1") && server.arg("wifiPass1") != config.wifiPass1) { config.wifiPass1 = server.arg("wifiPass1"); wifiChanged = true; }
+  if (server.hasArg("wifiSSID2") && server.arg("wifiSSID2") != config.wifiSSID2) { config.wifiSSID2 = server.arg("wifiSSID2"); wifiChanged = true; }
+  if (server.hasArg("wifiPass2") && server.arg("wifiPass2") != config.wifiPass2) { config.wifiPass2 = server.arg("wifiPass2"); wifiChanged = true; }
+  if (wifiChanged) {
+    needRestart = true;
+    restartReason = true;
+    logCaptureLn(String("WiFi配置已更改，需要重启"));
+  }
+
   // 账号管理表单：只在字段存在时更新
   if (server.hasArg("webUser")) {
     String newWebUser = server.arg("webUser");
@@ -886,35 +951,85 @@ void handleSave() {
     config.numberBlackList = server.arg("numberBlackList");
   }
 
-  // 推送通道配置：只在对应通道的字段存在时更新
+  // 推送通道配置：通过 hidden 标记字段确保每个通道都被处理
+  // checkbox 勾选时提交 pushXen=1，未勾选时不提交 pushXen
+  // hidden 字段 pushXch=1 始终提交，确保通道被识别
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
     String idx = String(i);
-    String enKey = "push" + idx + "en";
+    String chKey  = "push" + idx + "ch";   // hidden 标记，始终存在
+    String enKey  = "push" + idx + "en";   // checkbox，勾选时存在
     String typeKey = "push" + idx + "type";
-    String urlKey = "push" + idx + "url";
+    String urlKey  = "push" + idx + "url";
     String nameKey = "push" + idx + "name";
-    String k1Key = "push" + idx + "key1";
-    String k2Key = "push" + idx + "key2";
+    String k1Key   = "push" + idx + "key1";
+    String k2Key   = "push" + idx + "key2";
     String bodyKey = "push" + idx + "body";
-    // 只要该通道的任一字段存在，就更新整个通道
-    if (server.hasArg(enKey) || server.hasArg(typeKey) || server.hasArg(urlKey) ||
-        server.hasArg(nameKey) || server.hasArg(k1Key) || server.hasArg(k2Key) ||
-        server.hasArg(bodyKey)) {
-      config.pushChannels[i].enabled = server.arg(enKey) == "on";
-      config.pushChannels[i].type = (PushType)server.arg(typeKey).toInt();
-      config.pushChannels[i].url = server.arg(urlKey);
-      config.pushChannels[i].name = server.arg(nameKey);
-      config.pushChannels[i].key1 = server.arg(k1Key);
-      config.pushChannels[i].key2 = server.arg(k2Key);
-      config.pushChannels[i].customBody = server.arg(bodyKey);
-      if (config.pushChannels[i].name.length() == 0) {
-        config.pushChannels[i].name = "通道" + String(i + 1);
-      }
+
+    bool channelPresent = server.hasArg(chKey);
+    if (!channelPresent) continue;  // 该通道不在表单中，跳过
+
+    bool hasEn = server.hasArg(enKey);
+    config.pushChannels[i].enabled = hasEn;
+
+    if (server.hasArg(typeKey)) config.pushChannels[i].type = (PushType)server.arg(typeKey).toInt();
+    if (server.hasArg(urlKey))  config.pushChannels[i].url = server.arg(urlKey);
+    if (server.hasArg(nameKey)) config.pushChannels[i].name = server.arg(nameKey);
+    if (server.hasArg(k1Key))   config.pushChannels[i].key1 = server.arg(k1Key);
+    if (server.hasArg(k2Key))   config.pushChannels[i].key2 = server.arg(k2Key);
+    if (server.hasArg(bodyKey)) config.pushChannels[i].customBody = server.arg(bodyKey);
+    if (config.pushChannels[i].name.length() == 0) {
+      config.pushChannels[i].name = "通道" + String(i + 1);
     }
+    logCaptureLn(String("保存通道") + idx + String(": enabled=") + String(hasEn ? "1" : "0") + String(" type=") + String((int)config.pushChannels[i].type));
   }
   
   saveConfig();
   configValid = isConfigValid();
+  
+  // 判断是否需要重启
+  if (needRestart) {
+    String title;
+    String message;
+    if (restartReason) {
+      title = "WiFi配置已保存！";
+      message = "设备正在重启，新网络设置将立即生效...";
+    } else {
+      title = "网络模式已切换！";
+      message = "设备正在重启，新网络模式将立即生效...";
+    }
+    String html = R"rawliteral(<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>保存成功</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; padding-top: 100px; background: #f5f5f5; }
+    .success { background: #FF9800; color: white; padding: 20px; border-radius: 10px; display: inline-block; }
+  </style>
+</head>
+<body>
+  <div class="success">
+    <h2>✅ %TITLE%</h2>
+    <p>%MSG%</p>
+    <p style="font-size:12px;color:#888;">重启后约需30秒重新连接</p>
+  </div>
+</body>
+</html>)rawliteral";
+    html.replace("%TITLE%", title);
+    html.replace("%MSG%", message);
+    server.send(200, "text/html", html);
+    
+    if (restartReason) {
+      sendEmailNotification("短信转发器WiFi配置已更新", "WiFi配置已更新，设备即将重启...");
+      logCaptureLn(String("WiFi配置已保存，3秒后重启..."));
+    } else {
+      sendEmailNotification("短信转发器网络模式已切换", "网络模式已更改，设备即将重启...");
+      logCaptureLn(String("网络模式已更改，3秒后重启..."));
+    }
+    delay(3000);
+    ESP.restart();
+    return;  // 防止 restart 后继续执行
+  }
   
   String html = R"rawliteral(
 <!DOCTYPE html>
@@ -939,7 +1054,7 @@ void handleSave() {
 )rawliteral";
   server.send(200, "text/html", html);
   
-  // 如果配置有效，发送启动通知
+  // 如果配置有效且非WiFi更改，发送通知
   if (configValid) {
     logCaptureLn(String("配置有效，发送启动通知..."));
     String subject = "短信转发器配置已更新";
@@ -1093,16 +1208,40 @@ void handleWifi() {
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
     WiFi.setScanMethod(WIFI_FAST_SCAN);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    logCaptureLn(String("正在重新连接WiFi: " + String(WIFI_SSID)));
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-      delay(50);
-      server.handleClient();
+    
+    // 优先连接 WiFi 1，失败自动切换 WiFi 2
+    bool reconnected = false;
+    if (config.wifiSSID1.length() > 0) {
+      WiFi.begin(config.wifiSSID1.c_str(), config.wifiPass1.c_str());
+      logCaptureLn(String("正在重新连接 WiFi 1: ") + config.wifiSSID1);
+      unsigned long start = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        delay(50);
+        server.handleClient();
+      }
+      if (WiFi.status() == WL_CONNECTED) {
+        reconnected = true;
+        logCaptureLn(String("WiFi 1 重连成功, IP: " + WiFi.localIP().toString()));
+      }
     }
-    if (WiFi.status() == WL_CONNECTED) {
-      logCaptureLn(String("WiFi 重连成功, IP: " + WiFi.localIP().toString()));
-    } else {
+    
+    if (!reconnected && config.wifiSSID2.length() > 0) {
+      WiFi.disconnect(false);
+      delay(200);
+      WiFi.begin(config.wifiSSID2.c_str(), config.wifiPass2.c_str());
+      logCaptureLn(String("正在重新连接 WiFi 2: ") + config.wifiSSID2);
+      unsigned long start = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        delay(50);
+        server.handleClient();
+      }
+      if (WiFi.status() == WL_CONNECTED) {
+        reconnected = true;
+        logCaptureLn(String("WiFi 2 重连成功, IP: " + WiFi.localIP().toString()));
+      }
+    }
+    
+    if (!reconnected) {
       logCaptureLn(String("WiFi 重连失败，将在后台持续尝试"));
     }
   } else {

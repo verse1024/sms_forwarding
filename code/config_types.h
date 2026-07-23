@@ -3,6 +3,13 @@
 
 #include <Arduino.h>
 
+// 网络模式
+enum NetworkMode {
+  NET_MODE_WIFI = 0,         // 仅WiFi
+  NET_MODE_MOBILE = 1,      // 仅移动数据
+  NET_MODE_WIFI_MOBILE = 2 // WiFi+移动数据（WiFi优先，回退流量）
+};
+
 // 推送通道类型
 enum PushType {
   PUSH_TYPE_NONE = 0,      // 未启用
@@ -34,6 +41,13 @@ struct PushChannel {
 
 // 配置参数结构体
 struct Config {
+  NetworkMode networkMode;
+  // WiFi配置（网页上可设置）
+  String wifiSSID1;
+  String wifiPass1;
+  String wifiSSID2;
+  String wifiPass2;
+  // 邮件配置
   String smtpServer;
   int smtpPort;
   String smtpUser;

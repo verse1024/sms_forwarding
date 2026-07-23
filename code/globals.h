@@ -35,6 +35,9 @@ extern WebServer server;
 extern bool configValid;
 extern bool timeSynced;
 extern bool modemReady;
+extern bool simDetected;
+extern bool mobileDataActive;
+extern bool usingMobileData;
 extern unsigned long lastPrintTime;
 extern ConcatSms concatBuffer[MAX_CONCAT_MESSAGES];
 

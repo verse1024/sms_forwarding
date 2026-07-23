@@ -1,9 +1,17 @@
 #include "config.h"
 #include "web_handlers.h"
+#include "wifi_config.h"
 
 // 保存配置到NVS
 void saveConfig() {
   preferences.begin("sms_config", false);
+  preferences.putUChar("netMode", (uint8_t)config.networkMode);
+  // WiFi配置
+  preferences.putString("wifiSSID1", config.wifiSSID1);
+  preferences.putString("wifiPass1", config.wifiPass1);
+  preferences.putString("wifiSSID2", config.wifiSSID2);
+  preferences.putString("wifiPass2", config.wifiPass2);
+  // 邮件配置
   preferences.putString("smtpServer", config.smtpServer);
   preferences.putInt("smtpPort", config.smtpPort);
   preferences.putString("smtpUser", config.smtpUser);
@@ -33,6 +41,13 @@ void saveConfig() {
 // 从NVS加载配置
 void loadConfig() {
   preferences.begin("sms_config", true);
+  config.networkMode = (NetworkMode)preferences.getUChar("netMode", NET_MODE_WIFI_MOBILE);
+  // WiFi配置 - 优先使用NVS保存的配置，如果没有则使用wifi_config.h中的默认值
+  config.wifiSSID1 = preferences.getString("wifiSSID1", WIFI_SSID_1);
+  config.wifiPass1 = preferences.getString("wifiPass1", WIFI_PASS_1);
+  config.wifiSSID2 = preferences.getString("wifiSSID2", WIFI_SSID_2);
+  config.wifiPass2 = preferences.getString("wifiPass2", WIFI_PASS_2);
+  // 邮件配置
   config.smtpServer = preferences.getString("smtpServer", "");
   config.smtpPort = preferences.getInt("smtpPort", 465);
   config.smtpUser = preferences.getString("smtpUser", "");
@@ -113,5 +128,8 @@ bool isConfigValid() {
 
 // 获取当前设备URL
 String getDeviceUrl() {
+  if (WiFi.getMode() & WIFI_AP) {
+    return "http://" + WiFi.softAPIP().toString() + "/";
+  }
   return "http://" + WiFi.localIP().toString() + "/";
 }

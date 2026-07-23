@@ -11,5 +11,7 @@ bool sendATandWaitOK(const char* cmd, unsigned long timeout);
 bool waitCEREG();
 void blink_short(unsigned long gap_time = 500);
 bool sendSMS(const char* phoneNumber, const char* message);
+bool activateMobileData();
+bool deactivateMobileData();
 
 #endif
